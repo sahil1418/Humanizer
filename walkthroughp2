@@ -1,0 +1,44 @@
+# Humanizer v2.0 — Walkthrough
+
+## Phase 1 — Foundation ✅
+Built the core API with sanitisation, model routing, inference, validation, safety, and post-processing. **34 tests passing.**
+
+## Phase 2 — Multi-Pass Pipeline + Style ✅
+
+### New Modules (8 files)
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **Multi-Pass** | [pipeline/multi_pass.py](file:///D:/Projects/Humanizer/humanizer/pipeline/multi_pass.py) | 4-pass pipeline: summarize → expand → diversify → polish |
+| **Memory Drift** | [pipeline/memory_drift.py](file:///D:/Projects/Humanizer/humanizer/pipeline/memory_drift.py) | Proposition drift (5%), reference drift (8%), context compression [U5] |
+| **Pipeline Modes** | [pipeline/pipeline_modes.py](file:///D:/Projects/Humanizer/humanizer/pipeline/pipeline_modes.py) | Full / Lite / Deterministic with fallback logic |
+| **Style Vector** | [style/style_vector.py](file:///D:/Projects/Humanizer/humanizer/style/style_vector.py) | 6-axis continuous style (formality, complexity, density, hedging, nominalization, sentence_length) |
+| **Style Profiles** | [style/style_profiles.py](file:///D:/Projects/Humanizer/humanizer/style/style_profiles.py) | 6 profiles: formal_academic, semi_formal, conversational, mixed_tone, compressed, expanded [U3] |
+| **Prefix Encoder** | [style/prefix_encoder.py](file:///D:/Projects/Humanizer/humanizer/style/prefix_encoder.py) | nn.Module projecting style vector → soft prefix embeddings |
+| **Critic** | [critic/critic_model.py](file:///D:/Projects/Humanizer/humanizer/critic/critic_model.py) | Scores candidates on semantic fidelity + originality, selects best of 6 |
+| **Chunker** | [preprocessing/chunker.py](file:///D:/Projects/Humanizer/humanizer/preprocessing/chunker.py) | Semantic chunking for long-form with coherence stitching |
+
+### Pipeline Architecture
+
+```
+Input → [Pass 1: Summarize] → [Pass 2: Expand + Drift 5%]
+      → [Pass 3: Diversify] → [Pass 4: Polish + Drift 8%]
+      → Candidate
+      ×6 style profiles (multi-style sampling)
+      → Critic selects best → Output
+```
+
+For long documents (>500 tokens): semantic chunking → per-chunk rewrite with cross-chunk context (60 tokens) → coherence stitching.
+
+### Updated API
+- `/api/v1/rewrite` now uses the full multi-pass pipeline
+- Supports `style_profile`, [style_vector](file:///D:/Projects/Humanizer/humanizer/style/prefix_encoder.py#56-72), and `pipeline_mode` parameters
+- Auto-detects long-form text and switches to document pipeline
+
+### Test Results
+```
+62 passed in 1.43s
+```
+
+## Next: Phase 3 — Humanization Layers
+Noise injection [U1], perplexity controller [U2], discourse templates [U4], adaptive validation thresholds [U6].

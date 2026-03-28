@@ -1,0 +1,41 @@
+# Context-aware noise profiles (Weak Point 1 fix)
+# Each rate is further jittered ±30% at runtime
+profiles:
+  emotional:
+    connector_rate: 0.14
+    grammar_noise: 0.06
+    length_jitter: 0.20
+    redundancy_prob: 0.08
+    tone_drift_interval: 200
+
+  technical:
+    connector_rate: 0.05
+    grammar_noise: 0.02
+    length_jitter: 0.08
+    redundancy_prob: 0.03
+    tone_drift_interval: 400
+
+  narrative:
+    connector_rate: 0.12
+    grammar_noise: 0.05
+    length_jitter: 0.18
+    redundancy_prob: 0.07
+    tone_drift_interval: 220
+
+  academic:
+    connector_rate: 0.07
+    grammar_noise: 0.02
+    length_jitter: 0.10
+    redundancy_prob: 0.04
+    tone_drift_interval: 350
+
+# Default (used when genre is unknown)
+default:
+  connector_rate: 0.10
+  grammar_noise: 0.04
+  length_jitter: 0.15
+  redundancy_prob: 0.06
+  tone_drift_interval: 250
+
+# Jitter factor applied to all rates at runtime
+jitter_factor: 0.30

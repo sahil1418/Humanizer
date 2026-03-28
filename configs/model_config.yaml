@@ -1,0 +1,37 @@
+# Model configuration
+default_model: "t5-base"
+device: "auto"          # auto, cpu, cuda, mps
+dtype: "float16"        # float16, float32, bfloat16, int8, int4
+
+# Model-specific overrides
+models:
+  t5-base:
+    max_input_length: 512
+    max_output_length: 512
+    dtype: "float32"     # small enough for FP32
+
+  flan-t5-xl:
+    max_input_length: 1024
+    max_output_length: 1024
+    dtype: "float16"
+
+  bart-large:
+    max_input_length: 1024
+    max_output_length: 1024
+    dtype: "float16"
+
+  llama-3-8b-ft:
+    max_input_length: 4096
+    max_output_length: 2048
+    dtype: "int4"
+
+  mixtral-8x7b-q4:
+    max_input_length: 8192
+    max_output_length: 4096
+    dtype: "int4"
+
+# Inference server (for vLLM in later phases)
+inference:
+  backend: "transformers"   # transformers | vllm
+  batch_size: 1
+  continuous_batching: false

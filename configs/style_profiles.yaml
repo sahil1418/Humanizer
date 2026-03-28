@@ -1,0 +1,55 @@
+# Style profiles configuration — 6 named profiles (Upgrade 3)
+profiles:
+  formal_academic:
+    formality: 0.90
+    complexity: 0.80
+    density: 0.75
+    hedging: 0.60
+    nominalization: 0.80
+    sentence_length: 0.80
+    best_for: "Research, reports"
+
+  semi_formal:
+    formality: 0.65
+    complexity: 0.55
+    density: 0.55
+    hedging: 0.35
+    nominalization: 0.55
+    sentence_length: 0.55
+    best_for: "Business, professional"
+
+  conversational:
+    formality: 0.20
+    complexity: 0.25
+    density: 0.35
+    hedging: 0.15
+    nominalization: 0.25
+    sentence_length: 0.30
+    best_for: "Blogs, casual writing"
+
+  mixed_tone:
+    formality: 0.55
+    complexity: 0.45
+    density: 0.50
+    hedging: 0.30
+    nominalization: 0.45
+    sentence_length: 0.50
+    best_for: "General purpose"
+
+  compressed:
+    formality: 0.60
+    complexity: 0.50
+    density: 0.90
+    hedging: 0.20
+    nominalization: 0.50
+    sentence_length: 0.25
+    best_for: "Executive summaries"
+
+  expanded:
+    formality: 0.55
+    complexity: 0.40
+    density: 0.20
+    hedging: 0.40
+    nominalization: 0.40
+    sentence_length: 0.80
+    best_for: "Explanatory content"
