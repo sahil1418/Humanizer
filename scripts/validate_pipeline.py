@@ -1,19 +1,19 @@
 """
-Humanizer v2.0 — Pipeline Validation Script
-─────────────────────────────────────────────
+Humanizer v2.0 — Pipeline Validation Script (v2)
+──────────────────────────────────────────────────
 Run REAL inference with actual models to verify:
   1. Outputs are structurally different from inputs
   2. Different runs produce different outputs
   3. Style profiles generate noticeably different text
   4. Multi-pass pipeline produces genuine rewrites
   5. Memory drift and stochastic params create variation
+  6. Semantic validation scores are within target ranges
 
 Usage (on Lightning AI):
     python scripts/validate_pipeline.py
 """
 
 import asyncio
-import json
 import sys
 import time
 from pathlib import Path
@@ -75,47 +75,58 @@ def print_comparison(label: str, original: str, rewritten: str) -> None:
     rewrite_words = set(rewritten.lower().split())
     overlap = len(orig_words & rewrite_words) / max(len(orig_words), 1)
 
+    # N-gram overlap (more informative)
+    def ngrams(text, n=3):
+        tokens = text.lower().split()
+        return {tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)}
+
+    ng_orig = ngrams(original)
+    ng_rewrite = ngrams(rewritten)
+    ng_overlap = len(ng_orig & ng_rewrite) / max(len(ng_orig), 1) if ng_orig else 0
+
     print(f"  [{label}]")
     print(f"  ORIGINAL  ({len(original.split())} words):")
     print(f"    {original[:200]}{'...' if len(original) > 200 else ''}")
     print(f"  REWRITTEN ({len(rewritten.split())} words):")
     print(f"    {rewritten[:200]}{'...' if len(rewritten) > 200 else ''}")
-    print(f"  Word overlap: {overlap:.1%}")
+    print(f"  Word overlap:   {overlap:.1%}")
+    print(f"  3-gram overlap: {ng_overlap:.1%}")
     print()
 
 
-async def test_1_basic_rewrite():
-    """Test: Do outputs differ structurally from inputs?"""
-    print_header("TEST 1: Basic Rewrite — Is output structurally different?")
+async def test_1_four_pass_rewrite():
+    """Test: Does the 4-pass pipeline produce structurally different outputs?"""
+    print_header("TEST 1: 4-Pass Pipeline Rewrite — All Input Types")
 
-    from humanizer.inference.inference_layer import generate_text
+    from humanizer.pipeline.multi_pass import _run_single_pipeline
+    from humanizer.style.style_vector import StyleVector
+
+    sv = StyleVector()  # default mixed_tone
 
     for sample in TEST_INPUTS:
         t0 = time.perf_counter()
-        result = await generate_text(
-            "flan-t5-xl",
-            sample["text"],
-            prefix="paraphrase: ",
+        result = await _run_single_pipeline(
+            sample["text"], sv, model="flan-t5-xl",
         )
         elapsed = (time.perf_counter() - t0) * 1000
         print_comparison(f"{sample['name']} ({elapsed:.0f}ms)", sample["text"], result)
 
-    print("  → Check: Are rewrites genuinely different, or just synonym swaps?")
+    print("  → All inputs should show <50% word overlap and <30% 3-gram overlap")
 
 
 async def test_2_run_variation():
     """Test: Do different runs produce different outputs?"""
-    print_header("TEST 2: Run Variation — 3 runs on same input")
+    print_header("TEST 2: Run Variation — 3 runs on same input (4-pass)")
 
-    from humanizer.inference.inference_layer import generate_text
+    from humanizer.pipeline.multi_pass import _run_single_pipeline
+    from humanizer.style.style_vector import StyleVector
 
+    sv = StyleVector()
     sample = TEST_INPUTS[0]
     outputs = []
     for i in range(3):
-        result = await generate_text(
-            "flan-t5-xl",
-            sample["text"],
-            prefix="paraphrase: ",
+        result = await _run_single_pipeline(
+            sample["text"], sv, model="flan-t5-xl",
         )
         outputs.append(result)
         print(f"  Run {i+1}: {result[:150]}...")
@@ -130,10 +141,10 @@ async def test_2_run_variation():
 
 
 async def test_3_style_profiles():
-    """Test: Do style profiles produce noticeably different text?"""
-    print_header("TEST 3: Style Profiles — Same input, different styles")
+    """Test: Do style profiles produce noticeably different text via 4-pass?"""
+    print_header("TEST 3: Style Profiles — Same input, 6 styles via 4-pass")
 
-    from humanizer.inference.inference_layer import generate_text
+    from humanizer.pipeline.multi_pass import _run_single_pipeline
     from humanizer.style.style_profiles import get_all_profiles
 
     sample = TEST_INPUTS[0]
@@ -141,21 +152,13 @@ async def test_3_style_profiles():
 
     results = {}
     for name, sv in profiles.items():
-        # Craft style-aware prefix based on profile
-        if sv.formality > 0.7:
-            prefix = "Rewrite this formally and academically: "
-        elif sv.formality < 0.3:
-            prefix = "Rewrite this casually and conversationally: "
-        elif sv.density > 0.7:
-            prefix = "Rewrite this concisely: "
-        elif sv.density < 0.3:
-            prefix = "Rewrite this with more detail and explanation: "
-        else:
-            prefix = "Paraphrase this: "
-
-        result = await generate_text("flan-t5-xl", sample["text"], prefix=prefix)
+        t0 = time.perf_counter()
+        result = await _run_single_pipeline(
+            sample["text"], sv, model="flan-t5-xl",
+        )
+        elapsed = (time.perf_counter() - t0) * 1000
         results[name] = result
-        print(f"  [{name}] (f={sv.formality}, d={sv.density}):")
+        print(f"  [{name}] (f={sv.formality}, d={sv.density}) ({elapsed:.0f}ms):")
         print(f"    {result[:200]}...")
         print()
 
@@ -168,110 +171,155 @@ async def test_3_style_profiles():
         print("  ✓  Profiles produce varied output")
 
 
-async def test_4_multi_pass():
-    """Test: Does the multi-pass pipeline produce genuine rewrites?"""
-    print_header("TEST 4: Multi-Pass Pipeline — 4-pass single style")
+async def test_4_per_pass_trace():
+    """Test: Show what each pass produces for the academic paragraph."""
+    print_header("TEST 4: Per-Pass Trace — What each pass does")
 
-    from humanizer.pipeline.multi_pass import _run_single_pipeline
+    from humanizer.inference.inference_layer import generate_text
     from humanizer.style.style_vector import StyleVector
+    from humanizer.pipeline.multi_pass import (
+        _pass1_summarize, _pass2_expand, _pass3_diversify, _pass4_polish,
+    )
 
     sample = TEST_INPUTS[0]
     sv = StyleVector()
 
+    print(f"  ORIGINAL ({len(sample['text'].split())} words):")
+    print(f"    {sample['text'][:200]}...")
+    print()
+
+    # Pass 1
     t0 = time.perf_counter()
-    result = await _run_single_pipeline(
-        sample["text"],
-        sv,
-        model="flan-t5-xl",
-    )
-    elapsed = (time.perf_counter() - t0) * 1000
+    p1 = await _pass1_summarize(sample["text"], "flan-t5-xl")
+    print(f"  PASS 1 — Summarize ({(time.perf_counter()-t0)*1000:.0f}ms, {len(p1.split())} words):")
+    print(f"    {p1[:300]}{'...' if len(p1) > 300 else ''}")
+    print()
 
-    print_comparison(f"4-pass pipeline ({elapsed:.0f}ms)", sample["text"], result)
-    print("  → Check: Is this genuinely reconstructed, or surface-level?")
+    # Pass 2
+    t0 = time.perf_counter()
+    p2 = await _pass2_expand(p1, sv, "flan-t5-xl")
+    print(f"  PASS 2 — Expand ({(time.perf_counter()-t0)*1000:.0f}ms, {len(p2.split())} words):")
+    print(f"    {p2[:300]}{'...' if len(p2) > 300 else ''}")
+    print()
+
+    # Pass 3
+    t0 = time.perf_counter()
+    p3 = await _pass3_diversify(p2, sv, "flan-t5-xl")
+    print(f"  PASS 3 — Diversify ({(time.perf_counter()-t0)*1000:.0f}ms, {len(p3.split())} words):")
+    print(f"    {p3[:300]}{'...' if len(p3) > 300 else ''}")
+    print()
+
+    # Pass 4
+    t0 = time.perf_counter()
+    p4 = await _pass4_polish(p3, sv, "flan-t5-xl")
+    print(f"  PASS 4 — Polish ({(time.perf_counter()-t0)*1000:.0f}ms, {len(p4.split())} words):")
+    print(f"    {p4[:300]}{'...' if len(p4) > 300 else ''}")
+    print()
+
+    # Final comparison
+    print_comparison("End-to-end (4 passes)", sample["text"], p4)
 
 
-async def test_5_prompt_strategies():
-    """Test: Which prompt prefix works best for FLAN-T5?"""
-    print_header("TEST 5: Prompt Strategy Comparison")
+async def test_5_encoder_penalty_effect():
+    """Test: Does encoder_repetition_penalty reduce copy-through?"""
+    print_header("TEST 5: Encoder Repetition Penalty — Copy-Through Test")
 
     from humanizer.inference.inference_layer import generate_text
 
-    sample = TEST_INPUTS[0]["text"]
-    prefixes = {
-        "paraphrase": "paraphrase: ",
-        "rewrite": "Rewrite the following text in different words: ",
-        "restructure": "Restructure and rewrite this paragraph with different sentence structure: ",
-        "human-like": "Rewrite this to sound like a human wrote it from memory: ",
-        "simplify": "Explain this in your own words: ",
-    }
+    sample = TEST_INPUTS[0]["text"]  # Academic (hardest case)
+    prefix = "Rewrite the following text using completely different words: "
 
-    for name, prefix in prefixes.items():
-        result = await generate_text("flan-t5-xl", sample, prefix=prefix)
-        print(f"  [{name}]")
-        print(f"    {result[:200]}...")
+    # Test with penalty disabled vs enabled
+    for penalty, label in [(1.0, "No penalty"), (1.5, "Penalty=1.5"), (2.0, "Penalty=2.0")]:
+        result = await generate_text(
+            "flan-t5-xl", sample,
+            prefix=prefix,
+            encoder_repetition_penalty=penalty,
+        )
+        orig_words = set(sample.lower().split())
+        rewrite_words = set(result.lower().split())
+        overlap = len(orig_words & rewrite_words) / max(len(orig_words), 1)
+        print(f"  [{label}] Word overlap: {overlap:.1%}")
+        print(f"    {result[:180]}...")
         print()
 
-    print("  → Which prefix produces the most natural, structurally different output?")
+    print("  → Lower overlap = penalty is working")
 
 
 async def test_6_full_validation():
-    """Test: Semantic validation on real outputs."""
-    print_header("TEST 6: Semantic Validation on Real Output")
+    """Test: Semantic validation on 4-pass output."""
+    print_header("TEST 6: Semantic Validation on 4-Pass Output")
 
-    from humanizer.inference.inference_layer import generate_text
+    from humanizer.pipeline.multi_pass import _run_single_pipeline
+    from humanizer.style.style_vector import StyleVector
     from humanizer.validation.semantic_checks import validate_semantic
 
     sample = TEST_INPUTS[0]
-    rewritten = await generate_text(
-        "flan-t5-xl",
-        sample["text"],
-        prefix="Rewrite this paragraph in completely different words and structure: ",
+    sv = StyleVector()
+
+    rewritten = await _run_single_pipeline(
+        sample["text"], sv, model="flan-t5-xl",
     )
 
     validation = validate_semantic(sample["text"], rewritten)
 
-    print(f"  Semantic Similarity:  {validation.semantic_similarity:.3f}  (want: 0.75–0.90)")
-    print(f"  Lexical Novelty:     {validation.lexical_novelty:.3f}  (want: 0.55–0.72)")
-    print(f"  NLI Label:           {validation.nli_label}  (want: entailment)")
-    print(f"  NLI Score:           {validation.nli_entailment_score:.3f}")
-    print(f"  Entity Preserved:    {validation.entity_preserved}")
-    print(f"  Readability Delta:   {validation.readability_delta:.1f}  (want: < 14)")
-    print(f"  Overall Passed:      {validation.passed}")
+    sim_status = "✓" if 0.75 <= validation.semantic_similarity <= 0.90 else "⚠️"
+    nov_status = "✓" if 0.55 <= validation.lexical_novelty <= 0.72 else "⚠️"
+    nli_status = "✓" if validation.nli_label == "entailment" else "⚠️"
+    ent_status = "✓" if validation.entity_preserved else "⚠️"
+    read_status = "✓" if validation.readability_delta < 14 else "⚠️"
+
+    print(f"  {sim_status} Semantic Similarity:  {validation.semantic_similarity:.3f}  (want: 0.75–0.90)")
+    print(f"  {nov_status} Lexical Novelty:     {validation.lexical_novelty:.3f}  (want: 0.55–0.72)")
+    print(f"  {nli_status} NLI Label:           {validation.nli_label}  (want: entailment)")
+    print(f"    NLI Score:           {validation.nli_entailment_score:.3f}")
+    print(f"  {ent_status} Entity Preserved:    {validation.entity_preserved}")
+    print(f"  {read_status} Readability Delta:   {validation.readability_delta:.1f}  (want: < 14)")
+    print(f"    Overall Passed:      {validation.passed}")
     print()
     print(f"  ORIGINAL:  {sample['text'][:150]}...")
     print(f"  REWRITTEN: {rewritten[:150]}...")
 
 
 async def main():
-    print_header("HUMANIZER v2.0 — PIPELINE VALIDATION")
-    print("  Running 6 real-inference tests on FLAN-T5-XL.")
-    print("  This will download the model (~6GB) on first run.\n")
+    print_header("HUMANIZER v2.0 — PIPELINE VALIDATION (v2)")
+    print("  Running 6 tests with FLAN-T5-XL.")
+    print("  Changes from v1:")
+    print("    • All tests now use the 4-pass pipeline")
+    print("    • encoder_repetition_penalty=1.5 (anti-copy)")
+    print("    • Tuned temp=1.2, rep_penalty=2.0, no_repeat_ngram=4")
+    print("    • Chain-of-thought prompts for each pass")
+    print("    • Style-aware prefix injection in Pass 2 & 3")
+    print()
 
     # Ensure model registry has flan-t5-xl
     MODEL_REGISTRY["flan-t5-xl"] = "google/flan-t5-xl"
 
     t_start = time.perf_counter()
 
-    await test_1_basic_rewrite()
+    await test_1_four_pass_rewrite()
     await test_2_run_variation()
     await test_3_style_profiles()
-    await test_4_multi_pass()
-    await test_5_prompt_strategies()
+    await test_4_per_pass_trace()
+    await test_5_encoder_penalty_effect()
     await test_6_full_validation()
 
     total = time.perf_counter() - t_start
     print_header(f"VALIDATION COMPLETE — Total time: {total:.1f}s")
     print("  Review the outputs above and confirm:")
-    print("    1. Outputs are structurally different from inputs")
+    print("    1. 4-pass rewrites show <50% word overlap for all text types")
     print("    2. Different runs produce varied outputs")
     print("    3. Style profiles create noticeably different text")
-    print("    4. Multi-pass pipeline produces genuine rewrites")
-    print("    5. Validation scores are within expected ranges")
+    print("    4. Each pass contributes meaningful transformation")
+    print("    5. encoder_repetition_penalty reduces copy-through")
+    print("    6. Validation scores are within expected ranges")
     print()
-    print("  If outputs are shallow/synonym-only, we'll need to:")
-    print("    - Switch to FLAN-T5-large or T5-large")
-    print("    - Adjust prompts (Test 5 shows which works best)")
-    print("    - Add chain-of-thought prompting for deeper restructuring")
+    print("  Target metrics:")
+    print("    • Word overlap:           <50% (was 98-100%)")
+    print("    • 3-gram overlap:         <30%")
+    print("    • Semantic similarity:    0.75-0.90")
+    print("    • Lexical novelty:        0.55-0.72 (was 0.108)")
+    print("    • NLI:                    entailment")
 
 
 if __name__ == "__main__":

@@ -114,9 +114,10 @@ class GenerationConfig:
     num_beams: int = 6
     num_beam_groups: int = 3
     diversity_penalty: float = 0.80
-    temperature: float = 0.75
-    top_p: float = 0.90
-    repetition_penalty: float = 1.30
+    temperature: float = 1.2
+    top_p: float = 0.85
+    repetition_penalty: float = 2.0
+    encoder_repetition_penalty: float = 1.5   # penalise copying encoder tokens
     no_repeat_ngram_size: int = 4
     max_new_tokens: int = 512
 

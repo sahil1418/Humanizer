@@ -92,6 +92,7 @@ async def generate_text(
     max_new_tokens: Optional[int] = None,
     prefix: str = "paraphrase: ",
     use_sampling: bool = True,
+    encoder_repetition_penalty: Optional[float] = None,
 ) -> str:
     """
     Run inference on *input_text* using the specified model.
@@ -101,6 +102,9 @@ async def generate_text(
     Two decoding strategies:
       - use_sampling=True  → stochastic (temperature + top_p) — varied outputs
       - use_sampling=False → group beam search (deterministic, diverse beams)
+
+    encoder_repetition_penalty > 1.0 penalises generating tokens that appear
+    in the encoder input — directly combats FLAN-T5's copy-through tendency.
     """
     cfg = gen_cfg or GenCfg()
     model, tokenizer = load_model(model_name)
@@ -109,11 +113,22 @@ async def generate_text(
     prompt = f"{prefix}{input_text}" if prefix else input_text
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
 
+    # Dynamic max_new_tokens: scale to ~1.3× input length if not specified
+    input_token_count = inputs["input_ids"].shape[-1]
+    effective_max_tokens = max_new_tokens or max(
+        cfg.max_new_tokens,
+        int(input_token_count * 1.3),
+    )
+
+    # Effective encoder repetition penalty
+    enc_rep_penalty = encoder_repetition_penalty or cfg.encoder_repetition_penalty
+
     gen_kwargs: dict = {
         **inputs,
         "repetition_penalty": cfg.repetition_penalty,
+        "encoder_repetition_penalty": enc_rep_penalty,
         "no_repeat_ngram_size": cfg.no_repeat_ngram_size,
-        "max_new_tokens": max_new_tokens or cfg.max_new_tokens,
+        "max_new_tokens": effective_max_tokens,
         "max_length": None,   # Prevent model's default max_length=20 from truncating
         "num_return_sequences": 1,
         "trust_remote_code": True,
