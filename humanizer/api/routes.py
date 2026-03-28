@@ -74,7 +74,7 @@ async def rewrite(req: RewriteRequest):
         raise HTTPException(status_code=413, detail=str(e))
 
     # ── 2. Route to Model ──────────────────────────────────────────────
-    model_name = route_request(sanitized.token_count, req.quality_tier)
+    model_name = route_request(sanitized.token_count)
 
     # ── 3. Multi-Pass Pipeline ─────────────────────────────────────────
     # Build style vector from request

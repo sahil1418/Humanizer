@@ -6,35 +6,31 @@ from humanizer.router.model_router import route_request
 from humanizer.validation.safety import check_output_length, detect_prompt_injection
 
 
-# ── Model Router ───────────────────────────────────────────────────────────
+# ── Model Router (single-model architecture) ──────────────────────────────
 class TestModelRouter:
     def test_short_standard(self):
-        assert route_request(50, "standard") == "t5-base"
+        assert route_request(50, "standard") == "flan-t5-xl"
 
     def test_short_premium(self):
-        result = route_request(50, "premium")
-        assert result in ("bart-large", "llama-3-8b-ft")
+        assert route_request(50, "premium") == "flan-t5-xl"
 
     def test_medium_standard(self):
         assert route_request(500, "standard") == "flan-t5-xl"
 
     def test_medium_premium(self):
-        result = route_request(500, "premium")
-        assert result == "llama-3-8b-ft"
+        assert route_request(500, "premium") == "flan-t5-xl"
 
     def test_long(self):
-        result = route_request(1500, "standard")
-        assert result == "llama-3-8b-ft"
+        assert route_request(1500, "standard") == "flan-t5-xl"
 
     def test_very_long(self):
-        assert route_request(5000, "standard") == "mixtral-8x7b-q4"
+        assert route_request(5000, "standard") == "flan-t5-xl"
 
     def test_boundary_200(self):
         assert route_request(200, "standard") == "flan-t5-xl"
 
     def test_boundary_1000(self):
-        result = route_request(1000, "standard")
-        assert result == "llama-3-8b-ft"
+        assert route_request(1000, "standard") == "flan-t5-xl"
 
 
 # ── Safety (lightweight tests — no model loading) ──────────────────────────

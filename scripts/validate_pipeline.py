@@ -93,7 +93,7 @@ async def test_1_basic_rewrite():
     for sample in TEST_INPUTS:
         t0 = time.perf_counter()
         result = await generate_text(
-            "flan-t5-base",
+            "flan-t5-xl",
             sample["text"],
             prefix="paraphrase: ",
         )
@@ -113,7 +113,7 @@ async def test_2_run_variation():
     outputs = []
     for i in range(3):
         result = await generate_text(
-            "flan-t5-base",
+            "flan-t5-xl",
             sample["text"],
             prefix="paraphrase: ",
         )
@@ -153,7 +153,7 @@ async def test_3_style_profiles():
         else:
             prefix = "Paraphrase this: "
 
-        result = await generate_text("flan-t5-base", sample["text"], prefix=prefix)
+        result = await generate_text("flan-t5-xl", sample["text"], prefix=prefix)
         results[name] = result
         print(f"  [{name}] (f={sv.formality}, d={sv.density}):")
         print(f"    {result[:200]}...")
@@ -182,7 +182,7 @@ async def test_4_multi_pass():
     result = await _run_single_pipeline(
         sample["text"],
         sv,
-        model="flan-t5-base",
+        model="flan-t5-xl",
     )
     elapsed = (time.perf_counter() - t0) * 1000
 
@@ -206,7 +206,7 @@ async def test_5_prompt_strategies():
     }
 
     for name, prefix in prefixes.items():
-        result = await generate_text("flan-t5-base", sample, prefix=prefix)
+        result = await generate_text("flan-t5-xl", sample, prefix=prefix)
         print(f"  [{name}]")
         print(f"    {result[:200]}...")
         print()
@@ -223,7 +223,7 @@ async def test_6_full_validation():
 
     sample = TEST_INPUTS[0]
     rewritten = await generate_text(
-        "flan-t5-base",
+        "flan-t5-xl",
         sample["text"],
         prefix="Rewrite this paragraph in completely different words and structure: ",
     )
@@ -244,11 +244,11 @@ async def test_6_full_validation():
 
 async def main():
     print_header("HUMANIZER v2.0 — PIPELINE VALIDATION")
-    print("  Running 6 real-inference tests on FLAN-T5-base.")
-    print("  This will download the model (~990MB) on first run.\n")
+    print("  Running 6 real-inference tests on FLAN-T5-XL.")
+    print("  This will download the model (~6GB) on first run.\n")
 
-    # Update model registry to use flan-t5-base (smaller, instruction-tuned)
-    MODEL_REGISTRY["flan-t5-base"] = "google/flan-t5-base"
+    # Ensure model registry has flan-t5-xl
+    MODEL_REGISTRY["flan-t5-xl"] = "google/flan-t5-xl"
 
     t_start = time.perf_counter()
 

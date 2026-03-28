@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from humanizer.config import GenerationConfig, PipelineConfig
+from humanizer.config import DEFAULT_MODEL, GenerationConfig, PipelineConfig
 from humanizer.critic.critic_model import CriticScore, select_best
 from humanizer.inference.inference_layer import generate_text
 from humanizer.pipeline.memory_drift import (
@@ -57,14 +57,14 @@ class PipelineResult:
 
 # ── Individual Passes ──────────────────────────────────────────────────────
 
-async def _pass1_summarize(text: str, model: str = "t5-base") -> str:
+async def _pass1_summarize(text: str, model: str = DEFAULT_MODEL) -> str:
     """
     Pass 1: Abstractive Summarisation (Section 4.1).
     Collapse to semantic propositions — remove all surface form.
     """
     result = await generate_text(
         model, text,
-        prefix="summarize: ",
+        prefix="Summarize the key ideas in this text: ",
         max_new_tokens=256,
     )
     logger.debug("Pass 1 (summarize): %d → %d chars", len(text), len(result))
@@ -74,7 +74,7 @@ async def _pass1_summarize(text: str, model: str = "t5-base") -> str:
 async def _pass2_expand(
     propositions: str,
     style: StyleVector,
-    model: str = "t5-base",
+    model: str = DEFAULT_MODEL,
     *,
     drift_rate: float = 0.05,
 ) -> str:
@@ -87,23 +87,26 @@ async def _pass2_expand(
     drifted = apply_memory_drift(sentences, drift_rate=drift_rate)
     drifted_text = ". ".join(drifted) + "."
 
-    # Expand with style conditioning
-    prompt = f"expand and elaborate: {drifted_text}"
-    result = await generate_text(model, prompt, prefix="", max_new_tokens=512)
+    # Expand with style conditioning — instruction in prefix to prevent leaking
+    result = await generate_text(
+        model, drifted_text,
+        prefix="Expand these ideas into a detailed paragraph: ",
+        max_new_tokens=512,
+    )
     logger.debug("Pass 2 (expand+drift): %d → %d chars", len(propositions), len(result))
     return result
 
 
-async def _pass3_diversify(text: str, style: StyleVector, model: str = "t5-base") -> str:
+async def _pass3_diversify(text: str, style: StyleVector, model: str = DEFAULT_MODEL) -> str:
     """
     Pass 3: Syntactic Diversification (Section 4.1).
     Active↔passive, nominalization, clause reordering, lexical swap.
     """
-    prefix = "paraphrase: "
+    prefix = "Rewrite this with completely different sentence structure and wording: "
     if style.nominalization > 0.6:
-        prefix = "paraphrase with formal structure: "
+        prefix = "Rewrite this formally with different sentence structure: "
     elif style.formality < 0.3:
-        prefix = "rephrase casually: "
+        prefix = "Rewrite this casually in your own words: "
 
     result = await generate_text(model, text, prefix=prefix, max_new_tokens=512)
     logger.debug("Pass 3 (diversify): %d → %d chars", len(text), len(result))
@@ -113,7 +116,7 @@ async def _pass3_diversify(text: str, style: StyleVector, model: str = "t5-base"
 async def _pass4_polish(
     text: str,
     style: StyleVector,
-    model: str = "t5-base",
+    model: str = DEFAULT_MODEL,
     *,
     drift_rate: float = 0.08,
 ) -> str:
@@ -124,8 +127,12 @@ async def _pass4_polish(
     # Apply back-reference drift at 8%
     drifted = apply_reference_drift(text, drift_rate=drift_rate)
 
-    prompt = f"improve coherence and polish: {drifted}"
-    result = await generate_text(model, prompt, prefix="", max_new_tokens=512)
+    # Instruction in prefix to prevent leaking into output
+    result = await generate_text(
+        model, drifted,
+        prefix="Polish and improve the coherence of this text: ",
+        max_new_tokens=512,
+    )
     logger.debug("Pass 4 (polish+drift): %d → %d chars", len(text), len(result))
     return result
 
@@ -135,7 +142,7 @@ async def _pass4_polish(
 async def _run_single_pipeline(
     text: str,
     style: StyleVector,
-    model: str = "t5-base",
+    model: str = DEFAULT_MODEL,
     *,
     config: Optional[PipelineConfig] = None,
 ) -> str:
@@ -170,7 +177,7 @@ async def run_pipeline(
     *,
     style_profile: Optional[str] = None,
     style_vector: Optional[StyleVector] = None,
-    model: str = "t5-base",
+    model: str = DEFAULT_MODEL,
     config: Optional[PipelineConfig] = None,
     pipeline_mode: str = "full",
     enable_multi_style: bool = True,
@@ -264,7 +271,7 @@ async def run_document_pipeline(
     *,
     style_profile: Optional[str] = None,
     style_vector: Optional[StyleVector] = None,
-    model: str = "t5-base",
+    model: str = DEFAULT_MODEL,
     config: Optional[PipelineConfig] = None,
     enable_multi_style: bool = False,
 ) -> PipelineResult:

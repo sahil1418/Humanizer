@@ -12,7 +12,7 @@
 set -e
 
 echo "═══════════════════════════════════════════════════"
-echo "  Humanizer v2.0 — Lightning AI Setup"
+echo "  Humanizer v2.0 — Lightning AI Setup (L4 GPU)"
 echo "═══════════════════════════════════════════════════"
 
 # 1. Install the package + dev dependencies
@@ -24,20 +24,21 @@ pip install -e ".[dev]" --quiet
 echo "▸ Downloading spaCy English model..."
 python -m spacy download en_core_web_sm --quiet
 
-# 3. Pre-download the models we need for validation
-echo "▸ Pre-downloading models (this may take a few minutes)..."
+# 3. Pre-download the models we need
+echo "▸ Pre-downloading FLAN-T5-XL (~6GB, this may take a few minutes)..."
 python -c "
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import torch
 import os
 
 models = [
-    ('google/flan-t5-base', 'FLAN-T5-base (instruction-tuned, better for rewriting)'),
+    ('google/flan-t5-xl', 'FLAN-T5-XL (3B params, primary rewriting model)'),
 ]
 
 for model_id, desc in models:
     print(f'  Downloading {desc}...')
     AutoTokenizer.from_pretrained(model_id)
-    AutoModelForSeq2SeqLM.from_pretrained(model_id)
+    AutoModelForSeq2SeqLM.from_pretrained(model_id, dtype=torch.float16)
     print(f'  ✓ {model_id} ready')
 
 print('All models downloaded.')

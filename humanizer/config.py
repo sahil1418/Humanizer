@@ -30,6 +30,9 @@ SUPPORTED_LANGUAGES = {"en", "es", "fr", "de", "pt", "it"}
 # ---------------------------------------------------------------------------
 # Model catalogue — maps logical name → HuggingFace model ID
 # ---------------------------------------------------------------------------
+# Default model for personal use (single-model architecture)
+DEFAULT_MODEL: str = "flan-t5-xl"
+
 MODEL_REGISTRY: dict[str, str] = {
     "t5-base": "google/t5-v1_1-base",
     "t5-large": "google/t5-v1_1-large",
@@ -38,21 +41,10 @@ MODEL_REGISTRY: dict[str, str] = {
     "flan-t5-large": "google/flan-t5-large",
     "flan-t5-xl": "google/flan-t5-xl",
     "bart-large": "facebook/bart-large",
-    "llama-3-8b-ft": "meta-llama/Meta-Llama-3-8B-Instruct",
-    "mixtral-8x7b-q4": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     # Auxiliary
     "sbert": "sentence-transformers/all-MiniLM-L6-v2",
     "nli-deberta": "cross-encoder/nli-deberta-v3-base",
     "spacy-en": "en_core_web_sm",
-}
-
-# Maps meta-rewriter primary → secondary model (cross-family fingerprint break)
-META_REWRITER_MAP: dict[str, str] = {
-    "t5-base": "llama-3-8b-ft",
-    "flan-t5-xl": "llama-3-8b-ft",
-    "bart-large": "mixtral-8x7b-q4",
-    "llama-3-8b-ft": "mixtral-8x7b-q4",
-    "mixtral-8x7b-q4": "llama-3-8b-ft",
 }
 
 
@@ -89,7 +81,6 @@ class ValidationConfig:
 class PipelineConfig:
     """Top-level pipeline configuration."""
 
-    quality_tier: Literal["standard", "premium"] = "standard"
     pipeline_mode: Literal["full", "lite", "deterministic"] = "full"
     max_input_tokens: int = 8192
     default_style_profile: str = "mixed_tone"
@@ -138,13 +129,7 @@ class GenerationConfig:
 # ---------------------------------------------------------------------------
 # Latency targets (P99)
 # ---------------------------------------------------------------------------
-LATENCY_TARGETS_MS: dict[str, int] = {
-    "t5-base": 200,
-    "flan-t5-xl": 1200,
-    "bart-large": 1200,
-    "llama-3-8b-ft": 3500,
-    "mixtral-8x7b-q4": 12000,
-}
+# No latency SLAs for personal use — runtime depends on L4 GPU load
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 Inference Layer  (Section 3 + 17)
 ──────────────────────────────────
 Loads and manages HuggingFace transformer models.
-Phase 1 uses the `transformers` backend; later phases add vLLM.
+Personal-use edition — optimised for FLAN-T5-XL on Lightning AI L4.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from transformers import (
 )
 
 from humanizer.config import (
+    DEFAULT_MODEL,
     MODEL_REGISTRY,
     MODEL_CACHE_DIR,
     GenerationConfig as GenCfg,
@@ -74,7 +75,7 @@ def load_model(
     tokenizer = AutoTokenizer.from_pretrained(hf_id, cache_dir=str(MODEL_CACHE_DIR))
     model = AutoModelForSeq2SeqLM.from_pretrained(
         hf_id,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         cache_dir=str(MODEL_CACHE_DIR),
     ).to(device)
     model.eval()
@@ -90,11 +91,16 @@ async def generate_text(
     gen_cfg: Optional[GenCfg] = None,
     max_new_tokens: Optional[int] = None,
     prefix: str = "paraphrase: ",
+    use_sampling: bool = True,
 ) -> str:
     """
     Run inference on *input_text* using the specified model.
 
     For T5-family models the *prefix* is prepended (e.g. ``"paraphrase: "``).
+
+    Two decoding strategies:
+      - use_sampling=True  → stochastic (temperature + top_p) — varied outputs
+      - use_sampling=False → group beam search (deterministic, diverse beams)
     """
     cfg = gen_cfg or GenCfg()
     model, tokenizer = load_model(model_name)
@@ -103,20 +109,34 @@ async def generate_text(
     prompt = f"{prefix}{input_text}" if prefix else input_text
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
+    gen_kwargs: dict = {
+        **inputs,
+        "repetition_penalty": cfg.repetition_penalty,
+        "no_repeat_ngram_size": cfg.no_repeat_ngram_size,
+        "max_new_tokens": max_new_tokens or cfg.max_new_tokens,
+        "max_length": None,   # Prevent model's default max_length=20 from truncating
+        "num_return_sequences": 1,
+        "trust_remote_code": True,
+    }
+
+    if use_sampling:
+        # Stochastic sampling — produces varied outputs across runs
+        gen_kwargs.update(
+            do_sample=True,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+        )
+    else:
+        # Group beam search — deterministic, high quality
+        gen_kwargs.update(
             num_beams=cfg.num_beams,
             num_beam_groups=cfg.num_beam_groups,
             diversity_penalty=cfg.diversity_penalty,
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
-            repetition_penalty=cfg.repetition_penalty,
-            no_repeat_ngram_size=cfg.no_repeat_ngram_size,
-            max_new_tokens=max_new_tokens or cfg.max_new_tokens,
-            num_return_sequences=1,
-            do_sample=True,
+            do_sample=False,
         )
+
+    with torch.no_grad():
+        outputs = model.generate(**gen_kwargs)
 
     result = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return result

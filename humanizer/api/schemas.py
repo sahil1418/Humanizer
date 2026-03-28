@@ -25,7 +25,6 @@ class RewriteRequest(BaseModel):
     """POST /rewrite request body."""
 
     text: str = Field(..., min_length=1, max_length=50000, description="Input text to rewrite")
-    quality_tier: Literal["standard", "premium"] = Field("standard")
     style_profile: Optional[str] = Field(
         None,
         description="Named style profile: formal_academic, semi_formal, conversational, "
