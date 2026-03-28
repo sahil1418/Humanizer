@@ -1,13 +1,16 @@
 """
 Multi-Pass Generation Pipeline  (Section 4 + 6 + 12)
 ──────────────────────────────────────────────────────
-4-pass rewriting with style-aware prompts and memory drift.
+4-pass rewriting with sentence-level processing.
+
+Key insight: FLAN-T5-XL handles SHORT inputs (1-2 sentences) with SIMPLE
+prefixes far better than long paragraphs with complex instructions.
 
 Pipeline flow:
-  Pass 1: Abstractive Summarisation — collapse to semantic propositions
-  Pass 2: Proposition Expansion + Memory Drift [U5]
-  Pass 3: Syntactic Diversification
-  Pass 4: Coherence & Register Polish + Memory Drift [U5]
+  Pass 1: Sentence-level paraphrase (short prefix per sentence)
+  Pass 2: Structural reorganisation — merge/split/reorder sentences
+  Pass 3: Style-aware vocabulary pass (sentence-level)
+  Pass 4: Coherence & register polish (full paragraph)
 
 Multi-Style Sampling [U3]:
   Generate one candidate per style profile (6 total), then critic selects best.
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -55,175 +60,186 @@ class PipelineResult:
     pipeline_mode: str = "full"
 
 
-# ── Style-to-prefix mapping ───────────────────────────────────────────────
+# ── Sentence utilities ─────────────────────────────────────────────────────
 
-def _style_to_prefix_hint(style: StyleVector) -> str:
-    """
-    Map a StyleVector into a natural-language style instruction fragment.
-    Injected into Pass 2 and Pass 3 prompts so the model adjusts register.
-    """
-    hints = []
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, handling common abbreviations."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in sentences if s.strip() and len(s.strip()) > 5]
 
-    # Formality axis
-    if style.formality > 0.75:
-        hints.append("Use formal, academic language with precise terminology.")
-    elif style.formality > 0.5:
-        hints.append("Use professional, clear language.")
-    elif style.formality > 0.3:
-        hints.append("Use a balanced, accessible tone.")
-    else:
-        hints.append("Use casual, conversational language as if talking to a friend.")
-
-    # Complexity axis
-    if style.complexity > 0.7:
-        hints.append("Use sophisticated vocabulary and complex sentence structures.")
-    elif style.complexity < 0.3:
-        hints.append("Use simple, everyday words.")
-
-    # Density axis
-    if style.density > 0.7:
-        hints.append("Be concise and dense — remove filler words.")
-    elif style.density < 0.3:
-        hints.append("Expand and elaborate with examples and explanations.")
-
-    # Hedging axis
-    if style.hedging > 0.5:
-        hints.append("Include hedging phrases like 'it appears', 'suggests', 'may'.")
-    elif style.hedging < 0.2:
-        hints.append("Be direct and assertive.")
-
-    # Sentence length axis
-    if style.sentence_length > 0.7:
-        hints.append("Use long, compound-complex sentences.")
-    elif style.sentence_length < 0.3:
-        hints.append("Use short, punchy sentences.")
-
-    return " ".join(hints)
-
-
-# ── Language guard ─────────────────────────────────────────────────────────
 
 def _is_likely_english(text: str) -> bool:
     """Quick heuristic: check if text is mostly ASCII/English."""
-    if not text or len(text) < 10:
+    if not text or len(text) < 5:
         return False
     ascii_count = sum(1 for c in text if ord(c) < 128)
     return (ascii_count / len(text)) > 0.85
 
 
+# ── Style-to-prefix mapping ───────────────────────────────────────────────
+
+def _style_prefix_for_pass3(style: StyleVector) -> str:
+    """
+    Return a SHORT T5-compatible prefix for Pass 3 based on style.
+    FLAN-T5 works best with brief, direct prefixes — not paragraphs.
+    """
+    if style.formality > 0.75 and style.nominalization > 0.6:
+        return "Rewrite this formally and academically: "
+    elif style.formality > 0.75:
+        return "Rewrite this in formal language: "
+    elif style.formality < 0.3:
+        return "Rewrite this casually as if talking to a friend: "
+    elif style.density > 0.7:
+        return "Rewrite this more concisely: "
+    elif style.density < 0.3:
+        return "Rewrite this with more detail and explanation: "
+    elif style.complexity > 0.7:
+        return "Rewrite this using sophisticated vocabulary: "
+    elif style.complexity < 0.3:
+        return "Rewrite this using simple everyday words: "
+    elif style.sentence_length > 0.7:
+        return "Rewrite this using longer, more complex sentences: "
+    elif style.sentence_length < 0.3:
+        return "Rewrite this using short, punchy sentences: "
+    else:
+        return "Paraphrase this: "
+
+
 # ── Individual Passes ──────────────────────────────────────────────────────
 
-async def _pass1_summarize(text: str, model: str = DEFAULT_MODEL) -> str:
+async def _pass1_sentence_paraphrase(
+    text: str,
+    model: str = DEFAULT_MODEL,
+) -> str:
     """
-    Pass 1: Abstractive Summarisation (Section 4.1).
-    Extract the core meaning — strip away the original surface form.
-    Uses extractive key-point decomposition to force the model to decompose
-    rather than copy.
+    Pass 1: Sentence-level paraphrase.
+
+    Split into individual sentences and paraphrase each one separately.
+    FLAN-T5-XL produces much better rewrites on short inputs with simple
+    prefixes like "paraphrase:" than on full paragraphs.
     """
-    result = await generate_text(
-        model, text,
-        prefix=(
-            "Read the following text carefully, then list its 3-5 main claims "
-            "as short bullet points using completely different words. "
-            "Do not copy any phrases from the original text. "
-            "Write in English:\n\n"
-        ),
-        max_new_tokens=256,
-    )
-    if not _is_likely_english(result):
-        logger.warning("Pass 1 produced non-English output, falling back")
+    sentences = _split_sentences(text)
+    if not sentences:
         return text
-    logger.debug("Pass 1 (summarize): %d → %d chars", len(text), len(result))
-    return result
+
+    rewritten = []
+    for sent in sentences:
+        # Use multiple short prefix variants to add diversity
+        prefix = random.choice([
+            "paraphrase: ",
+            "Rephrase this sentence: ",
+            "Rewrite in different words: ",
+        ])
+        result = await generate_text(
+            model, sent,
+            prefix=prefix,
+            max_new_tokens=max(len(sent.split()) * 3, 60),
+        )
+        # Guard: reject if output is non-English, empty, or too short
+        if not _is_likely_english(result) or len(result.split()) < 3:
+            rewritten.append(sent)  # keep original sentence
+        else:
+            rewritten.append(result.strip())
+
+    result_text = " ".join(rewritten)
+    logger.debug("Pass 1 (sentence paraphrase): %d → %d chars, %d sentences",
+                 len(text), len(result_text), len(sentences))
+    return result_text
 
 
-async def _pass2_expand(
-    propositions: str,
+async def _pass2_restructure(
+    text: str,
     style: StyleVector,
     model: str = DEFAULT_MODEL,
     *,
     drift_rate: float = 0.05,
 ) -> str:
     """
-    Pass 2: Proposition Expansion + Memory Drift [U5] (Section 4.1).
-    Rebuild from key ideas into a full paragraph using new wording.
-    Chain-of-thought prompting forces fresh vocabulary.
+    Pass 2: Structural reorganisation + memory drift.
+
+    - Reorder sentences (move 1-2 sentences to different positions)
+    - Merge short consecutive sentences into compound ones
+    - Apply memory drift to simulate human recall imperfections
     """
-    # Apply memory drift at 5% of propositions
-    sentences = [s.strip() for s in propositions.split(".") if s.strip()]
-    drifted = apply_memory_drift(sentences, drift_rate=drift_rate)
-    drifted_text = ". ".join(drifted) + "."
-
-    # Style-aware expansion instruction
-    style_hint = _style_to_prefix_hint(style)
-
-    result = await generate_text(
-        model, drifted_text,
-        prefix=(
-            "You are a university student rewriting an essay from memory. "
-            "Using only these notes, write a detailed paragraph entirely in "
-            "your own words. Do not reuse any phrases from the notes. "
-            f"{style_hint} "
-            "Write in English:\n\n"
-        ),
-        max_new_tokens=512,
-    )
-    if not _is_likely_english(result):
-        logger.warning("Pass 2 produced non-English output, falling back")
-        return propositions
-    logger.debug("Pass 2 (expand+drift): %d → %d chars", len(propositions), len(result))
-    return result
-
-
-async def _pass3_diversify(text: str, style: StyleVector, model: str = DEFAULT_MODEL) -> str:
-    """
-    Pass 3: Syntactic Diversification (Section 4.1).
-    Restructure sentences — change voice, clause order, word choice.
-    Uses contrastive instruction to ensure no 3-word overlap.
-    """
-    style_hint = _style_to_prefix_hint(style)
-
-    prefix = (
-        "Rewrite the following text so that no 3-word phrase from the "
-        "original appears in your version. Change sentence order, voice "
-        "(active/passive), and vocabulary completely. "
-        f"{style_hint} "
-        "Write in English:\n\n"
-    )
-
-    # Override for extreme style points
-    if style.formality > 0.8 and style.nominalization > 0.6:
-        prefix = (
-            "Rewrite this text in a formal academic style using completely "
-            "different sentence structures. Use nominalization, passive voice, "
-            "and technical vocabulary. No phrase from the original should appear "
-            "in your version. Write in English:\n\n"
-        )
-    elif style.formality < 0.3:
-        prefix = (
-            "Explain this in your own words as if telling a friend about it "
-            "over coffee. Use casual language, contractions, and short sentences. "
-            "Don't copy any phrases from the original. Write in English:\n\n"
-        )
-    elif style.density > 0.7:
-        prefix = (
-            "Condense this text into fewer sentences while keeping all key "
-            "information. Use completely different wording — no phrase from "
-            "the original should appear. Write in English:\n\n"
-        )
-    elif style.density < 0.3:
-        prefix = (
-            "Expand and elaborate on this text with additional explanation "
-            "and examples. Rewrite every sentence using new vocabulary. "
-            "Write in English:\n\n"
-        )
-
-    result = await generate_text(model, text, prefix=prefix, max_new_tokens=512)
-    if not _is_likely_english(result):
-        logger.warning("Pass 3 produced non-English output, falling back")
+    sentences = _split_sentences(text)
+    if len(sentences) < 2:
         return text
-    logger.debug("Pass 3 (diversify): %d → %d chars", len(text), len(result))
-    return result
+
+    # Apply memory drift (5% of sentences get light paraphrasing)
+    sentences = apply_memory_drift(sentences, drift_rate=drift_rate)
+
+    # Structural operations:
+    result_sentences = list(sentences)
+
+    # 1. Sentence reordering — swap 1-2 adjacent pairs
+    #    (humans don't recall information in exact original order)
+    n_swaps = max(1, len(result_sentences) // 4)
+    for _ in range(n_swaps):
+        if len(result_sentences) >= 2:
+            idx = random.randint(0, len(result_sentences) - 2)
+            result_sentences[idx], result_sentences[idx + 1] = (
+                result_sentences[idx + 1], result_sentences[idx]
+            )
+
+    # 2. Merge short consecutive sentences (if both < 12 words)
+    merged = []
+    i = 0
+    while i < len(result_sentences):
+        if (i + 1 < len(result_sentences)
+                and len(result_sentences[i].split()) < 12
+                and len(result_sentences[i + 1].split()) < 12
+                and random.random() < 0.4):
+            # Merge with a connector
+            connectors = [", and ", ", while ", "; moreover, ", " — in fact, ", ", which means "]
+            connector = random.choice(connectors)
+            s1 = result_sentences[i].rstrip(".")
+            s2 = result_sentences[i + 1]
+            s2 = s2[0].lower() + s2[1:] if s2 else s2
+            merged.append(f"{s1}{connector}{s2}")
+            i += 2
+        else:
+            merged.append(result_sentences[i])
+            i += 1
+
+    result_text = " ".join(merged)
+    logger.debug("Pass 2 (restructure+drift): %d → %d sentences",
+                 len(sentences), len(merged))
+    return result_text
+
+
+async def _pass3_style_rewrite(
+    text: str,
+    style: StyleVector,
+    model: str = DEFAULT_MODEL,
+) -> str:
+    """
+    Pass 3: Style-aware sentence-level rewrite.
+
+    Each sentence gets rewritten with a style-specific SHORT prefix.
+    This pass changes vocabulary and register to match the target style.
+    """
+    sentences = _split_sentences(text)
+    if not sentences:
+        return text
+
+    prefix = _style_prefix_for_pass3(style)
+
+    rewritten = []
+    for sent in sentences:
+        result = await generate_text(
+            model, sent,
+            prefix=prefix,
+            max_new_tokens=max(len(sent.split()) * 3, 60),
+        )
+        if not _is_likely_english(result) or len(result.split()) < 3:
+            rewritten.append(sent)
+        else:
+            rewritten.append(result.strip())
+
+    result_text = " ".join(rewritten)
+    logger.debug("Pass 3 (style rewrite): %d → %d chars, style=%s",
+                 len(text), len(result_text), prefix[:30])
+    return result_text
 
 
 async def _pass4_polish(
@@ -234,25 +250,36 @@ async def _pass4_polish(
     drift_rate: float = 0.08,
 ) -> str:
     """
-    Pass 4: Coherence & Register Polish + Memory Drift [U5] (Section 4.1).
-    Final pass — improve flow, fix awkward phrasing, ensure consistency.
+    Pass 4: Coherence & Register Polish + back-reference drift.
+
+    Full-paragraph pass to smooth transitions and fix awkward phrasing
+    from the sentence-level operations in Passes 1-3.
+
+    Uses SHORT prefix — FLAN-T5-XL responds better to brief instructions.
     """
     # Apply back-reference drift at 8%
     drifted = apply_reference_drift(text, drift_rate=drift_rate)
 
     result = await generate_text(
         model, drifted,
-        prefix=(
-            "Improve the coherence, grammar, and flow of the following text. "
-            "Fix any awkward phrasing and ensure smooth transitions between ideas. "
-            "Keep the same meaning but make it read naturally. "
-            "Write in English:\n\n"
-        ),
-        max_new_tokens=512,
+        prefix="Improve the grammar and flow of this paragraph: ",
+        max_new_tokens=max(len(drifted.split()) * 2, 200),
     )
+
+    # Guard: reject if output lost too much content
     if not _is_likely_english(result):
         logger.warning("Pass 4 produced non-English output, falling back")
         return text
+
+    result_words = len(result.split())
+    input_words = len(text.split())
+
+    if result_words < input_words * 0.5:
+        # Model truncated — output is less than 50% of input length
+        logger.warning("Pass 4 truncated (%d → %d words), falling back",
+                       input_words, result_words)
+        return text
+
     logger.debug("Pass 4 (polish+drift): %d → %d chars", len(text), len(result))
     return result
 
@@ -268,28 +295,32 @@ async def _run_single_pipeline(
 ) -> str:
     """Run the 4-pass pipeline for a single style profile."""
     cfg = config or PipelineConfig()
+    input_word_count = len(text.split())
 
-    # Pass 1: Collapse to propositions
-    summarized = await _pass1_summarize(text, model)
-    logger.info("Pass 1 done: %d → %d chars", len(text), len(summarized))
+    # Pass 1: Sentence-level paraphrase
+    paraphrased = await _pass1_sentence_paraphrase(text, model)
+    logger.info("Pass 1 done: %d → %d words", input_word_count, len(paraphrased.split()))
 
-    # Pass 2: Expand with drift
-    expanded = await _pass2_expand(
-        summarized, style, model,
+    # Pass 2: Structural reorganisation + drift
+    restructured = await _pass2_restructure(
+        paraphrased, style, model,
         drift_rate=cfg.drift_rate_pass2,
     )
-    logger.info("Pass 2 done: %d → %d chars", len(summarized), len(expanded))
+    logger.info("Pass 2 done: %d → %d words",
+                len(paraphrased.split()), len(restructured.split()))
 
-    # Pass 3: Syntactic diversification
-    diversified = await _pass3_diversify(expanded, style, model)
-    logger.info("Pass 3 done: %d → %d chars", len(expanded), len(diversified))
+    # Pass 3: Style-aware sentence rewrite
+    styled = await _pass3_style_rewrite(restructured, style, model)
+    logger.info("Pass 3 done: %d → %d words",
+                len(restructured.split()), len(styled.split()))
 
-    # Pass 4: Polish with drift
+    # Pass 4: Coherence polish + drift
     polished = await _pass4_polish(
-        diversified, style, model,
+        styled, style, model,
         drift_rate=cfg.drift_rate_pass4,
     )
-    logger.info("Pass 4 done: %d → %d chars", len(diversified), len(polished))
+    logger.info("Pass 4 done: %d → %d words",
+                len(styled.split()), len(polished.split()))
 
     return polished
 
@@ -309,7 +340,7 @@ async def run_pipeline(
     """
     Full multi-pass rewriting pipeline with multi-style sampling (Section 4 + 6).
 
-    ALWAYS uses the 4-pass pipeline (summarize → expand → diversify → polish).
+    ALWAYS uses the 4-pass pipeline (paraphrase → restructure → style → polish).
 
     In 'full' mode with multi_style=True:
       - Generate one candidate per style profile (6 total)
